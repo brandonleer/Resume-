@@ -1,0 +1,212 @@
+
+DROP PROC IF EXISTS dbo.parametric_test;
+GO
+CREATE PROC dbo.parametric_test
+AS                                                                                                                                                      
+BEGIN;
+EXECUTE sp_execute_external_script
+@language = N'R',
+@script = N'
+
+#initializes answer variable as numeric and finds sample size, number of levels, and number of permutations
+InputDataSet$answer <- as.numeric(InputDataSet$answer)
+n <- nrow(InputDataSet)
+i <- 1
+num_levels <- as.numeric(length(levels(InputDataSet$race  _code)))
+num_pairs <- num_levels * (num_levels - 1) / 2 #number of group pairings that can be calculated
+
+#initializes empty vectors
+group_diff_vector <- c()
+pvalue_vector <- c()
+con_vector <- c()
+group1_vector <- c()
+group2_vector <- c()
+
+#calculates normality of distribution with p.value
+normality <- shapiro.test(as.numeric(InputDataSet$answer))
+norm.p.value <- normality$p.value
+
+#tests if data meets the requriments for normaility at all levels
+if(norm.p.value <= 0.1) {
+normal <- "Normal at 90% Confidence"
+}
+if(norm.p.value <= 0.05) {
+normal <- "Normal at 95% Confidence"
+}
+if(norm.p.value <= 0.01) {
+normal <- "Normal at 99% Confidence"
+}
+if(norm.p.value > 0.1) {
+normal <- "Not Normal"
+}
+
+#Tests if sample size is large enough
+if(n >= 30) {
+sample_size <- "Meets Requirement"
+}
+if(n < 30) {
+sample_size <- "Does not meet Requirement"
+}
+
+#finds number of levels in independent variable to determine which tests are run
+if(num_levels == 2) {
+ftest <- var.test(answer ~ gender_code, data = InputDataSet) #var.test used if there is two levels to calculate variance
+ftest.p.value <- ftest$p.value
+para_test <- "T-Test"
+t.test <- t.test(answer ~ gender_code, data = InputDataSet) #t.test is used to see if group means are different if there are two levels
+statistic <- t.test$statistic
+parameter <- t.test$parameter #extracting t-statistic, degrees of freedom, and p.value from t.test
+p.value <- t.test$p.value
+pvalue_vector <- append(pvalue_vector, p.value)
+mean1 <- t.test$estimate[1] #calculating means of groups and the difference
+mean2 <- t.test$estimate[2]
+difference <- mean1 - mean2
+group_diff_vector <- append(group_diff_vector, difference) #adding difference to vector
+levels <- levels(InputDataSet$gender_code)
+group1 <- levels[1] #adds individual group in each permutation to its own vector
+group1_vector <- append(group1_vector, group1)
+group2 <- levels[2]
+group2_vector <- append(group2_vector, group2)
+groups_compared <- paste(group1, group2, sep = " and ")
+sum.sq <- -1 #initialize to -1 since they are not used for this test
+mean.sq <- -1
+if(p.value <= 0.1) { #determines if data is significant enough for at least one group means to be different
+evidence <- "Not Equal with 90% Confidence"
+con.level <- "with 90% confidence"
+}
+if(p.value <= 0.05) {
+evidence <- "Not Equal with 95% Confidence"
+con.level <- "with 95% confidence"
+} #testing to see if at least one mean is not equal to the rest
+if(p.value <= 0.01) {
+evidence <- "Not Equal with 99% Confidence"
+con.level <- "with 99% confidence"
+}
+if(p.value > 0.1) {
+evidence <- "Equal"
+conclusion <- "Means are Equal"
+}            
+
+if(mean1 > mean2) {
+conclusion <- paste(group1, group2, sep = " has a higher mean than ") #initializing conclusion variable with confidence level for two groups
+conclusion <- paste(conclusion, con.level)
+}
+if(mean1 < mean2) {
+conclusion <- paste(group2, group1, sep = " has a higher mean than ")
+conclusion <- paste(conclusion, con.level)
+}
+con_vector <- append(con_vector, conclusion)
+}
+
+if(num_levels > 2) { #different tests used if more than two groups
+ftest <- bartlett.test(answer ~ race_description, data = InputDataSet) #bartlett test used to find variance if more than two groups
+ftest.p.value <- ftest$p.value
+para_test <- "One-Way Anova Test"
+res.aov <- aov(answer ~ race_description, data = InputDataSet) #One way anova test used to see if at least one mean is different if there are more than 2 groups
+sum <- summary(res.aov)
+p.value <- summary(res.aov)[[1]][[1,"Pr(>F)"]] #extracting p.value, f-statistic, and degrees of freedom from anova test
+statistic <- summary(res.aov)[[1]][[1,"F value"]]
+parameter <- summary(res.aov)[[1]][[1,"Df"]]
+sum.sq <- summary(res.aov)[[1]][[1,"Sum Sq"]] #calculats deviation from the mean and average deviation from the mean between groups
+mean.sq <- summary(res.aov)[[1]][[1,"Mean Sq"]]
+mean1 <- -1 #setting irrelevant variables to -1
+mean2 <- -1
+#calculates the differences between each group and their p-value
+posthoc <- TukeyHSD(res.aov) #quantifies difference between multiple groups
+while (i <= num_pairs) {
+group_difference <- posthoc[[1]][[i, "diff"]] #extracts difference between each group
+diff_pvalue <- posthoc[[1]][[i, "p adj"]] #extracts associated p-value with each difference
+group_diff_vector <- append(group_diff_vector, group_difference) #both are added to vectors of differences and p-values
+pvalue_vector <- append(pvalue_vector, diff_pvalue)
+groups_compared <- rownames(posthoc[[1]])[i]
+groups <- strsplit(groups_compared, "-")[[1]]
+group1 <- groups[[1]]
+group1_vector <- append(group1_vector, groups[[1]]) #appending columns for individual groups in each vector
+group2 <- groups[[2]]
+group2_vector <- append(group2_vector, groups[[2]])
+if(group_difference < 0){
+conclusion <- paste(group1, group2, sep = " is less than ") #finding which mean is higher
+}
+if(group_difference > 0){
+conclusion <- paste(group1, group2, sep = " is greater than ")
+}
+if(diff_pvalue <= 0.1) {
+evidence <- "with 90% Confidence"
+conclusion <- paste(conclusion, evidence)
+con_vector <- append(con_vector, conclusion)
+}
+if(diff_pvalue <= 0.05) {
+evidence <- "with 95% Confidence"
+conclusion <- paste(conclusion, evidence)
+con_vector <- append(con_vector, conclusion)
+}
+if(diff_pvalue <= 0.01) {
+evidence <- "with 99% Confidence"
+conclusion <- paste(conclusion, evidence)
+con_vector <- append(con_vector, conclusion)
+}
+if(diff_pvalue > 0.1) {
+evidence <- "Equal"
+conclusion <- paste(group1, group2, sep = " and ")
+conclusion <- paste(conclusion, evidence, sep = " are ")
+con_vector <- append(con_vector, conclusion)
+}            
+i <- i + 1
+}
+}
+
+
+#calculates if variance is equal at all levels
+if(ftest.p.value >= 0.1) {
+variance <- "Equal at 90% Confidence"
+}
+if(ftest.p.value >= 0.05) {
+variance <- "Equal at 95% Confidence"
+}
+if(ftest.p.value >= 0.01) {
+variance <- "Equal at 99% Confidence"
+}
+if(ftest.p.value < 0.01) {
+variance <- "Not equal"
+} #testing parametric conditions is done
+
+
+
+
+#creates new dataframe with appropriate values and uses it as output
+OutputDataSet  <- data.frame(normal, norm.p.value, sample_size, n, variance, ftest.p.value, para_test, num_levels, evidence, statistic, parameter, mean1, mean2, sum.sq, mean.sq, group1_vector, group2_vector, group_diff_vector, pvalue_vector, con_vector)'
+
+, @input_data_1 = N'
+
+/*function returns distribution, normal p.value, sample size, count, variance, and variance p.value which all have to meet the conditions for the parametric tests to be run
+next is the parametric test, number of levels in independent variable, statistic for (t or anova test), degrees of freedom, p.value for (t or anova test),
+mean comparrison (at least one not equal or all equal), group 1 & 2 mean for t-test, difference of group means,  sum of squares, mean of squares, and conclusion */
+
+
+SELECT es.completion_date, es.comments, esa.*, p.name, p.gender_code,
+p.birth_date, p.race_code, cdr.description AS race_description,
+p.is_smoker, DATEDIFF(YEAR, p.birth_date, esa.answer_date) AS age_when_answered,
+ep.company_code, ep.role_code, ep.hire_date
+FROM empsurvey es
+INNER JOIN empsurveya esa ON esa.person_id = es.person_id AND esa.survey_id = es.survey_id
+INNER JOIN person p ON p.person_id = es.person_id
+INNER JOIN empprim ep ON ep.person_id = es.person_id
+LEFT OUTER JOIN cdrace cdr ON cdr.race_code = p.race_code
+WHERE es.survey_id = 49
+AND es.completion_date IS NOT NULL
+AND esa.question_id = 93;'
+
+WITH RESULT SETS
+(
+(
+"Distribution" nvarchar(max), "Normal P.Value" float, "Sample Size" nvarchar(max), "Count" int,
+"Variance" nvarchar(max), "Variance P.Value" float, "Parametric Test" nvarchar(max), "Number of Levels" int,
+"Mean Comparison" nvarchar(max), "Test Statistic" float, "Degrees of Freedom" int,
+"Group 1 Mean" float, "Group 2 Mean" float, "Sum of Squares" float,
+"Mean of Squares" float, "Group 1" nvarchar(max), "Group 2" nvarchar(max), "Difference Between Groups" float,
+"P.Value for Difference" float, "Conclusion" nvarchar(max)
+)
+)
+END;
+
+GO
